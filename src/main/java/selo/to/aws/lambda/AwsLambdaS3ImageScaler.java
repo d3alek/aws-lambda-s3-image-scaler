@@ -1,5 +1,6 @@
 package selo.to.aws.lambda;
 
+import java.awt.Color;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
@@ -135,6 +136,10 @@ public class AwsLambdaS3ImageScaler implements RequestHandler<S3Event, String> {
 
       BufferedImage tmp = new BufferedImage(w, h, type);
       Graphics2D g2 = tmp.createGraphics();
+      // Fill with white before applying semi-transparent (alpha) images
+      g2.setPaint(Color.white);
+      g2.fillRect(0, 0, w, h);
+
       g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, hint);
       g2.drawImage(ret, 0, 0, w, h, null);
       g2.dispose();
