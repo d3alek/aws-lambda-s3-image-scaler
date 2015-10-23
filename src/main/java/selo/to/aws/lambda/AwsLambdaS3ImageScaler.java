@@ -1,14 +1,21 @@
 package selo.to.aws.lambda;
 
+import static java.util.Optional.empty;
+
 import java.awt.Color;
 import java.awt.Graphics2D;
 import java.awt.RenderingHints;
 import java.awt.image.BufferedImage;
+import java.awt.image.ColorModel;
+import java.awt.image.WritableRaster;
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URLDecoder;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
@@ -25,55 +32,66 @@ import com.amazonaws.services.s3.model.ObjectMetadata;
 import com.amazonaws.services.s3.model.S3Object;
 
 public class AwsLambdaS3ImageScaler implements RequestHandler<S3Event, String> {
-  private static final String PREFIX = "thumbnail-";
-  private static final float MAX_WIDTH = 200;
-  private static final float MAX_HEIGHT = 200;
-  private final String JPG_TYPE = "jpg";
-  private final String JPG_MIME = "image/jpeg";
-  private final String PNG_TYPE = "png";
-  private final String PNG_MIME = "image/png";
+  public static final Pattern FILE_TYPE_PATTERN = Pattern.compile(".*\\.([^\\.]*)");
+  public static final String PREFIX = "scaled";
+  private static final List<Integer> SCALE_DIMENSIONS = new ArrayList<Integer>();
+
+  static {
+    SCALE_DIMENSIONS.add(200);
+    SCALE_DIMENSIONS.add(400);
+    SCALE_DIMENSIONS.add(800);
+  }
+
+  public static final String JPG_TYPE = "jpg";
+  private static final String JPG_MIME = "image/jpeg";
+  public static final String PNG_TYPE = "png";
+  private static final String PNG_MIME = "image/png";
 
   public String handleRequest(S3Event s3event, Context context) {
     try {
       S3EventNotificationRecord record = s3event.getRecords().get(0);
 
-      String srcBucket = record.getS3().getBucket().getName();
+      String bucket = record.getS3().getBucket().getName();
       // Object key may have spaces or unicode non-ASCII characters.
       String srcKey = record.getS3().getObject().getKey().replace('+', ' ');
       srcKey = URLDecoder.decode(srcKey, "UTF-8");
 
-      if (srcKey.startsWith(PREFIX)) {
-        System.out.println("Target image is already a thumbnail");
-        return "Nothing";
-      }
+      return scaleImage(bucket, srcKey);
+    } catch (IOException e) {
+      throw new RuntimeException(e);
+    }
+  }
 
-      String dstBucket = srcBucket;
-      String dstKey = PREFIX + srcKey;
+  public static String scaleImage(String bucket, String key) throws IOException {
+    if (key.startsWith(PREFIX)) {
+      System.out.println("Target image is already scaled");
+      return "Nothing";
+    }
 
-      // Infer the image type.
-      Matcher matcher = Pattern.compile(".*\\.([^\\.]*)").matcher(srcKey);
-      if (!matcher.matches()) {
-        System.out.println("Unable to infer image type for key " + srcKey);
-        return "";
-      }
-      String imageType = matcher.group(1);
-      if (!(JPG_TYPE.equals(imageType)) && !(PNG_TYPE.equals(imageType))) {
-        System.out.println("Skipping non-image " + srcKey);
-        return "";
-      }
+    Optional<String> optionalImageType = getImageType(key);
+    if (!optionalImageType.isPresent()) {
+      return "";
+    }
+    String imageType = optionalImageType.get();
 
-      // Download the image from S3 into a stream
-      AmazonS3 s3Client = new AmazonS3Client();
-      S3Object s3Object = s3Client.getObject(new GetObjectRequest(srcBucket, srcKey));
-      InputStream objectData = s3Object.getObjectContent();
+    // Download the image from S3 into a stream
+    AmazonS3 s3Client = new AmazonS3Client();
+    S3Object s3Object = s3Client.getObject(new GetObjectRequest(bucket, key));
+    InputStream objectData = s3Object.getObjectContent();
 
-      // Read the source image
-      BufferedImage srcImage = ImageIO.read(objectData);
-      int srcHeight = srcImage.getHeight();
-      int srcWidth = srcImage.getWidth();
+    // Read the source image
+    BufferedImage srcImage = ImageIO.read(objectData);
+    int srcHeight = srcImage.getHeight();
+    int srcWidth = srcImage.getWidth();
+
+    for (int scaleDimension : SCALE_DIMENSIONS) {
+
+      String dstKey = PREFIX + "-" + scaleDimension + "-" + key;
+
       // Infer the scaling factor to avoid stretching the image
       // unnaturally
-      float scalingFactor = Math.min(MAX_WIDTH / srcWidth, MAX_HEIGHT / srcHeight);
+      float scalingFactor =
+          Math.min((float) scaleDimension / srcWidth, (float) scaleDimension / srcHeight);
       int width = (int) (scalingFactor * srcWidth);
       int height = (int) (scalingFactor * srcHeight);
 
@@ -95,23 +113,21 @@ public class AwsLambdaS3ImageScaler implements RequestHandler<S3Event, String> {
       }
 
       // Uploading to S3 destination bucket
-      System.out.println("Writing to: " + dstBucket + "/" + dstKey);
-      s3Client.putObject(dstBucket, dstKey, is, meta);
-      System.out.println("Successfully resized " + srcBucket + "/" + srcKey + " and uploaded to "
-          + dstBucket + "/" + dstKey);
-      return "Ok";
-    } catch (IOException e) {
-      throw new RuntimeException(e);
+      System.out.println("Writing to: " + bucket + "/" + dstKey);
+      s3Client.putObject(bucket, dstKey, is, meta);
+      System.out.println("Successfully resized " + bucket + "/" + key + " and uploaded to " + bucket
+          + "/" + dstKey);
     }
+    return "Ok";
   }
 
   /**
    * Source: https://today.java.net/pub/a/today/2007/04/03/perils-of-image-getscaledinstance.html
    */
-  public BufferedImage getHighQualityScaledInstance(BufferedImage img, int targetWidth,
+  public static BufferedImage getHighQualityScaledInstance(BufferedImage img, int targetWidth,
       int targetHeight, Object hint) {
     int type = BufferedImage.TYPE_INT_RGB;
-    BufferedImage ret = (BufferedImage) img;
+    BufferedImage ret = deepCopy(img);
     int w, h;
     // Use multi-step technique: start with original size, then
     // scale down in multiple passes with drawImage()
@@ -122,16 +138,15 @@ public class AwsLambdaS3ImageScaler implements RequestHandler<S3Event, String> {
     do {
       if (w > targetWidth) {
         w /= 2;
-        if (w < targetWidth) {
-          w = targetWidth;
-        }
       }
-
+      if (w < targetWidth) {
+        w = targetWidth;
+      }
       if (h > targetHeight) {
         h /= 2;
-        if (h < targetHeight) {
-          h = targetHeight;
-        }
+      }
+      if (h < targetHeight) {
+        h = targetHeight;
       }
 
       BufferedImage tmp = new BufferedImage(w, h, type);
@@ -148,6 +163,28 @@ public class AwsLambdaS3ImageScaler implements RequestHandler<S3Event, String> {
     } while (w != targetWidth || h != targetHeight);
 
     return ret;
+  }
+
+  static BufferedImage deepCopy(BufferedImage bi) {
+    ColorModel cm = bi.getColorModel();
+    boolean isAlphaPremultiplied = cm.isAlphaPremultiplied();
+    WritableRaster raster = bi.copyData(null);
+    return new BufferedImage(cm, raster, isAlphaPremultiplied, null);
+  }
+
+  private static Optional<String> getImageType(String key) {
+    Matcher matcher = FILE_TYPE_PATTERN.matcher(key);
+    if (!matcher.matches()) {
+      System.out.println("Unable to infer image type for key " + key);
+      return empty();
+    }
+    String imageType = matcher.group(1);
+    if (!(JPG_TYPE.equals(imageType)) && !(PNG_TYPE.equals(imageType))) {
+      System.out.println("Skipping non-image " + key);
+      return empty();
+    }
+
+    return Optional.of(imageType);
   }
 
 }
