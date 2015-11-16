@@ -14,7 +14,9 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.net.URLDecoder;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -42,10 +44,16 @@ public class AwsLambdaS3ImageScaler implements RequestHandler<S3Event, String> {
     SCALE_DIMENSIONS.add(800);
   }
 
-  public static final String JPG_TYPE = "jpg";
   private static final String JPG_MIME = "image/jpeg";
-  public static final String PNG_TYPE = "png";
   private static final String PNG_MIME = "image/png";
+
+  private static final Map<String, String> imageTypeMime = new HashMap<>();
+
+  static {
+    imageTypeMime.put("jpg", JPG_MIME);
+    imageTypeMime.put("jpeg", JPG_MIME);
+    imageTypeMime.put("png", PNG_MIME);
+  }
 
   public String handleRequest(S3Event s3event, Context context) {
     try {
@@ -105,12 +113,12 @@ public class AwsLambdaS3ImageScaler implements RequestHandler<S3Event, String> {
       // Set Content-Length and Content-Type
       ObjectMetadata meta = new ObjectMetadata();
       meta.setContentLength(os.size());
-      if (JPG_TYPE.equals(imageType)) {
-        meta.setContentType(JPG_MIME);
+      String contentType = imageTypeMime.get(imageType);
+      if (contentType == null) {
+        throw new RuntimeException(
+            String.format("Unknown content type for image type %s", imageType));
       }
-      if (PNG_TYPE.equals(imageType)) {
-        meta.setContentType(PNG_MIME);
-      }
+      meta.setContentType(contentType);
 
       // Uploading to S3 destination bucket
       System.out.println("Writing to: " + bucket + "/" + dstKey);
@@ -179,7 +187,7 @@ public class AwsLambdaS3ImageScaler implements RequestHandler<S3Event, String> {
       return empty();
     }
     String imageType = matcher.group(1);
-    if (!(JPG_TYPE.equals(imageType)) && !(PNG_TYPE.equals(imageType))) {
+    if (!imageTypeMime.keySet().contains(imageType)) {
       System.out.println("Skipping non-image " + key);
       return empty();
     }
