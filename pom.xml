@@ -2,7 +2,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>to.selo</groupId>
   <artifactId>image-scaler</artifactId>
-  <version>0.0.8-SNAPSHOT</version>
+  <version>0.0.9-SNAPSHOT</version>
   <name>image-scaler</name>
   <dependencies>
   	<dependency>
