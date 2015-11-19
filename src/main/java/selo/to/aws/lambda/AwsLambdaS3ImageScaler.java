@@ -93,9 +93,6 @@ public class AwsLambdaS3ImageScaler implements RequestHandler<S3Event, String> {
     int srcWidth = srcImage.getWidth();
 
     for (int scaleDimension : SCALE_DIMENSIONS) {
-
-      String dstKey = PREFIX + "-" + scaleDimension + "-" + key;
-
       // Infer the scaling factor to avoid stretching the image
       // unnaturally
       float scalingFactor =
@@ -106,27 +103,56 @@ public class AwsLambdaS3ImageScaler implements RequestHandler<S3Event, String> {
       BufferedImage resizedImage = getHighQualityScaledInstance(srcImage, width, height,
           RenderingHints.VALUE_INTERPOLATION_BICUBIC);
 
-      // Re-encode image to target format
-      ByteArrayOutputStream os = new ByteArrayOutputStream();
-      ImageIO.write(resizedImage, imageType, os);
-      InputStream is = new ByteArrayInputStream(os.toByteArray());
-      // Set Content-Length and Content-Type
-      ObjectMetadata meta = new ObjectMetadata();
-      meta.setContentLength(os.size());
-      String contentType = imageTypeMime.get(imageType);
-      if (contentType == null) {
-        throw new RuntimeException(
-            String.format("Unknown content type for image type %s", imageType));
-      }
-      meta.setContentType(contentType);
+      BufferedImage squaredImage =
+          getSquaredImage(resizedImage, RenderingHints.VALUE_INTERPOLATION_BICUBIC);
 
-      // Uploading to S3 destination bucket
-      System.out.println("Writing to: " + bucket + "/" + dstKey);
-      s3Client.putObject(bucket, dstKey, is, meta);
-      System.out.println("Successfully resized " + bucket + "/" + key + " and uploaded to " + bucket
-          + "/" + dstKey);
+      String dstKeyResized = PREFIX + "-" + scaleDimension + "-" + key;
+      String dstKeyResizedSquared = PREFIX + "-" + scaleDimension + "-squared-" + key;
+
+      saveToS3(bucket, key, imageType, s3Client, dstKeyResized, resizedImage);
+      saveToS3(bucket, key, imageType, s3Client, dstKeyResizedSquared, squaredImage);
     }
     return "Ok";
+  }
+
+  private static void saveToS3(String bucket, String key, String imageType, AmazonS3 s3Client,
+      String dstKey, BufferedImage resizedImage) throws IOException {
+    // Re-encode image to target format
+    ByteArrayOutputStream os = new ByteArrayOutputStream();
+    ImageIO.write(resizedImage, imageType, os);
+    InputStream is = new ByteArrayInputStream(os.toByteArray());
+    // Set Content-Length and Content-Type
+    ObjectMetadata meta = new ObjectMetadata();
+    meta.setContentLength(os.size());
+    String contentType = imageTypeMime.get(imageType);
+    if (contentType == null) {
+      throw new RuntimeException(
+          String.format("Unknown content type for image type %s", imageType));
+    }
+    meta.setContentType(contentType);
+
+    // Uploading to S3 destination bucket
+    System.out.println("Writing to: " + bucket + "/" + dstKey);
+    s3Client.putObject(bucket, dstKey, is, meta);
+    System.out.println(
+        "Successfully resized " + bucket + "/" + key + " and uploaded to " + bucket + "/" + dstKey);
+  }
+
+  private static BufferedImage getSquaredImage(BufferedImage resizedImage, Object hint) {
+    int squareSize = Math.min(resizedImage.getWidth(), resizedImage.getHeight());
+    BufferedImage square = new BufferedImage(squareSize, squareSize, resizedImage.getType());
+    Graphics2D g2 = square.createGraphics();
+    // Fill with white before applying semi-transparent (alpha) images
+    g2.setPaint(Color.white);
+    g2.fillRect(0, 0, squareSize, squareSize);
+
+    g2.setRenderingHint(RenderingHints.KEY_INTERPOLATION, hint);
+    g2.drawImage(resizedImage, 0, 0, squareSize, squareSize,
+        resizedImage.getWidth() / 2 - squareSize / 2, resizedImage.getHeight() / 2 - squareSize / 2,
+        resizedImage.getWidth() / 2 + squareSize / 2, resizedImage.getHeight() / 2 + squareSize / 2,
+        null);
+    g2.dispose();
+    return square;
   }
 
   /**
